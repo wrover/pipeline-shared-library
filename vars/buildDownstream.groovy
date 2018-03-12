@@ -5,6 +5,7 @@
  * @return ничего
  */
 def call(downstreamPipelines) {
+
     if (env.BRANCH_NAME == 'master')
         downstreamPipelines.each { group ->
             def groupPipelines = [:]
