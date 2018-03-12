@@ -1,5 +1,6 @@
 /**
  * Выполняет простой вид деплоя через SSH на машину с установленным Docker.
+ *
  * @param imageTag  имя образа
  * @param version   мапа, которую отдает buildVersion
  * @param dockerRegistry    имя реестра
