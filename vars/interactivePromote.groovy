@@ -16,7 +16,7 @@ def call(promotionTargets, imageTag, version, dockerRegistry) {
 
     def targets = [:]
     try {
-        timeout(time: 180, unit: 'SECONDS') {
+        timeout(time: 30, unit: 'SECONDS') {
             targets = input(id: 'Promote', message: 'Let\'s promote to Docker targets?',
                     parameters: params)
         }
