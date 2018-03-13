@@ -24,7 +24,7 @@ def call(promotionTargets, imageTag, version, dockerRegistry) {
         if (v)
             stage(k) {
                 target = promotionTargets[k]
-                deployDockerSimple(imageTag, version, dockerRegistry, v)
+                deployDockerSimple(imageTag, version, dockerRegistry, target)
             }
     }
 }
