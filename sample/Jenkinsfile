@@ -1,0 +1,150 @@
+#!/usr/bin/env groovy
+/**
+ * <p>This Pipeline is supposed to use with Jenkins Multibranch Pipelines only.
+ * <p>Next, you have to use shared library from GoodSeeds/pipeline-shared-library
+ * and <code>import com.seed.pipeline.GlobalSettings</code>
+ *
+ * <p>Project-specific setting should be provided right here in Jenkinsfile.
+ * <ul>
+ * <li>upstreamPipelines - list of pipelines on which this one depends (array)
+ * <li>downstreamPipelines - list of downstream pipelines to be built once this one is built successfully
+ * <li>imageTag - tag to use for Docker images
+ * <li>deployTargets - description of Docker hosts where the built image should be deployed automatically
+ * <li>promotionTargets - description of Docker hosts where the built image could be promoted
+ * </ul>
+ *
+ * @Author Ilia Rodionov, mailto:to@wildrover.ru
+ */
+
+@Library('pipeline-shared-library') _
+import com.seed.pipeline.GlobalSettings
+
+// list of upstream pipelines on which this one depends
+// array, 0 or 2 or more elements
+// the order is of importance!
+upstreamPipelines = [
+]
+
+// list of lists for downstream pipelines to be triggered after successful build of this one
+// at the moment trigger only when on master branch
+// first-level elements (groups of pipelines) process one by one
+// elements of one inner array (pipelines) are built in parallel mode
+downstreamPipelines = [
+]
+
+// tag to use for Docker images
+imageTag = ''
+
+// Docker targets where the image should be always deployed
+deployTargets = [
+]
+
+// Docker targets where the image could be promoted (array), 0 or 2 or more elements
+promotionTargets = [
+]
+
+node {
+
+    properties([parameters([booleanParam(defaultValue: false, description: 'Running as dependency means skip all inputs.', name: 'RUN_AS_DEP')])])
+
+    // It's useful to observe the environment
+    sh 'printenv'
+
+    // Optimism is our motto!
+    currentBuild.result = "SUCCESS"
+
+    def version
+
+    try {
+
+        // get sources, check and build version
+        stage('Checkout') {
+            echo 'Checkout sources...'
+            checkout scm
+
+            version = buildVersion(getGradleVersionNumber())
+            if (!version.version) {
+                error version.error
+            }
+        }
+
+        // only when there are upstream pipelines and interactive mode is on
+        if (upstreamPipelines.size() > 0 && env.RUN_AS_DEP != 'true')
+            stage('Upstream') {
+                buildUpstream(upstreamPipelines)
+            }
+
+        // This should be done always
+        stage('Build&upload') {
+
+            sh './gradlew -version'
+
+            echo "version=${version.version}"
+
+            sh "./gradlew -Pcuba.artifact.version=${version.version} -Pcuba.artifact.isSnapshot=${version.isSnapshot} -DbuildNumber=${env.BUILD_NUMBER ?: ''} -DbranchName=${env.BRANCH_NAME ?: ''} --refresh-dependencies clean assemble uploadArchives"
+        }
+
+        // Next stages only when imageTag is specified
+        if (imageTag) {
+
+            stage('Build WARs & Image') {
+
+                sh "./gradlew -Pcuba.artifact.version=${version.version} -Pcuba.artifact.isSnapshot=${version.isSnapshot} -DbuildNumber=${env.BUILD_NUMBER ?: ''} -DbranchName=${env.BRANCH_NAME ?: ''} --refresh-dependencies -x test buildWar"
+
+                sh "rm -f ${workspace}/docker-image/war/*"
+                sh "cp ${workspace}/build/distributions/war/*.war ${workspace}/docker-image/war"
+
+                dir("${workspace}/docker-image") {
+                    app = docker.build("${imageTag}:${version.version}")
+                }
+            }
+
+            stage('Push image') {
+
+                docker.withRegistry(GlobalSettings.DOCKER_REGISTRY_URL, GlobalSettings.DOCKER_CREDENTIALS) {
+
+                    app.push("${version.version}")
+
+                    if (version.isSnapshot)
+                        app.push('snapshot')
+                    else
+                        app.push('latest')
+                }
+            }
+
+            // Parallel deploy to deploy targets
+            if (deployTargets.size() > 0)
+                stage('Deploy') {
+                    def targets = [:]
+
+                    deployTargets.each { k, v ->
+                        targets[k] = {
+                            deployDockerSimple(imageTag, version, GlobalSettings.DOCKER_REGISTRY, v)
+                        }
+                    }
+                    targets.failFast = false
+                    parallel targets
+                }
+
+            // Promotion stage takes place only when promotionTargets is not empty and run in interactive mode and
+            if (promotionTargets.size() > 0 && env.RUN_AS_DEP != 'true')
+                stage('Promotion') {
+                    interactivePromote(promotionTargets, imageTag, version, GlobalSettings.DOCKER_REGISTRY)
+                }
+        }
+
+        // Trigger downstream pipelines
+        if (downstreamPipelines.size() > 0 && env.RUN_AS_DEP != 'true')
+            stage('Downstream') {
+                buildDownstream(downstreamPipelines)
+            }
+
+    } catch (org.jenkinsci.plugins.workflow.steps.FlowInterruptedException fie) {
+        // вообще говоря, не только таймер может кинуть это исключение
+        echo "Ignoring FlowInterruptedException $fie.getMessage()"
+    } catch (err) {
+        currentBuild.result = "FAILURE"
+        notifyFailedBuild()
+        throw err
+    }
+}
